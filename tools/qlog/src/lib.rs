@@ -375,17 +375,15 @@ impl QlogStreamer {
         // serialize in a streaming manner. So at the start of serialization,
         // take off all closing delimiters, and leave us in a state to accept
         // new events.
-        // TODO: this unfortunately removes any events already existing in the
-        // trace, which might be undesirable.
         match serde_json::to_string(&self.qlog) {
             Ok(mut out) => {
-                if let Some(index) = out.find("\"events\":[") {
-                    out.truncate(index + "\"events\":[".len());
-                }
+                out.truncate(out.len() - 4);
 
                 self.writer.as_mut().write_all(out.as_bytes())?;
 
                 self.log_started = true;
+
+                self.first_event = self.qlog.traces[0].events.is_empty();
             },
 
             _ => return Err(Error::Done),
@@ -431,74 +429,65 @@ impl QlogStreamer {
 
         let event_time = self.start_time.elapsed();
 
-        if let Some(t) = self.qlog.traces.get(0) {
-            let rel = match &t.configuration {
-                Some(conf) => match conf.time_units {
-                    Some(TimeUnits::Ms) => event_time.as_millis().to_string(),
+        let rel = match &self.qlog.traces[0].configuration {
+            Some(conf) => match conf.time_units {
+                Some(TimeUnits::Ms) => event_time.as_millis().to_string(),
 
-                    Some(TimeUnits::Us) => event_time.as_micros().to_string(),
-
-                    None => String::from(""),
-                },
+                Some(TimeUnits::Us) => event_time.as_micros().to_string(),
 
                 None => String::from(""),
-            };
+            },
 
-            // TODO: this unfortunately removes any frames already existing in the
-            // event, which might be undesirable.
-            let (ev_data, contains_frames) =
-                match serde_json::to_string(&event.data) {
-                    Ok(mut ev_data_out) =>
-                        if event.data.contains_quic_frames() {
-                            if let Some(index) = ev_data_out.find("\"frames\":[")
-                            {
-                                ev_data_out
-                                    .truncate(index + "\"frames\":[".len());
-                            }
+            None => String::from(""),
+        };
 
-                            self.first_frame = true;
+        let (ev_data, contains_frames) = match serde_json::to_string(&event.data)
+        {
+            Ok(mut ev_data_out) =>
+                if let Some(f) = event.data.contains_quic_frames() {
+                    ev_data_out.truncate(ev_data_out.len() - 2);
 
-                            (ev_data_out, true)
-                        } else {
-                            (ev_data_out, false)
-                        },
+                    if f == 0 {
+                        self.first_frame = true;
+                    }
 
-                    _ => return Err(Error::Done),
-                };
+                    (ev_data_out, true)
+                } else {
+                    (ev_data_out, false)
+                },
 
-            let maybe_comma = if self.first_event {
-                self.first_event = false;
-                ""
-            } else {
-                ","
-            };
+            _ => return Err(Error::Done),
+        };
 
-            let maybe_terminate = if contains_frames { "" } else { "]" };
+        let maybe_comma = if self.first_event {
+            self.first_event = false;
+            ""
+        } else {
+            ","
+        };
 
-            let ev_time =
-                serde_json::to_string(&EventField::RelativeTime(rel)).ok();
-            let ev_cat =
-                serde_json::to_string(&EventField::Category(event.category)).ok();
-            let ev_ty = serde_json::to_string(&EventField::Event(event.ty)).ok();
+        let maybe_terminate = if contains_frames { "" } else { "]" };
 
-            if let (Some(ev_time), Some(ev_cat), Some(ev_ty)) =
-                (ev_time, ev_cat, ev_ty)
-            {
-                let out = format!(
-                    "{}[{},{},{},{}{}",
-                    maybe_comma, ev_time, ev_cat, ev_ty, ev_data, maybe_terminate
-                );
+        let ev_time = serde_json::to_string(&EventField::RelativeTime(rel)).ok();
+        let ev_cat =
+            serde_json::to_string(&EventField::Category(event.category)).ok();
+        let ev_ty = serde_json::to_string(&EventField::Event(event.ty)).ok();
 
-                self.writer.as_mut().write_all(out.as_bytes())?;
-                self.writing_event = contains_frames;
+        if let (Some(ev_time), Some(ev_cat), Some(ev_ty)) =
+            (ev_time, ev_cat, ev_ty)
+        {
+            let out = format!(
+                "{}[{},{},{},{}{}",
+                maybe_comma, ev_time, ev_cat, ev_ty, ev_data, maybe_terminate
+            );
 
-                return Ok(contains_frames);
-            } else {
-                return Err(Error::Done);
-            }
+            self.writer.as_mut().write_all(out.as_bytes())?;
+            self.writing_event = contains_frames;
+
+            return Ok(contains_frames);
         }
 
-        Ok(false)
+        Err(Error::Done)
     }
 
     /// Writes a JSON-serialized `QuicFrame`.
@@ -522,9 +511,7 @@ impl QlogStreamer {
                 self.writer.as_mut().write_all(out.as_bytes())?;
 
                 if last {
-                    self.writer.as_mut().write_all(b"]}]")?;
-                    self.writing_frames = false;
-                    self.writing_event = false;
+                    self.finish_frames()?;
                 }
             },
 
@@ -1326,19 +1313,24 @@ pub enum EventData {
 }
 
 impl EventData {
-    /// Detects if `EventData` contains an array of `QuicFrame`s.
-    pub fn contains_quic_frames(&self) -> bool {
+    /// Returns size of `EventData` array of `QuicFrame`s if it exists.
+    pub fn contains_quic_frames(&self) -> Option<usize> {
         // For some EventData variants, the frame array is optional
         // but for others it is mandatory.
         match self {
             EventData::PacketSent { frames, .. } |
-            EventData::PacketReceived { frames, .. } => frames.is_some(),
+            EventData::PacketReceived { frames, .. } =>
+                if let Some(f) = frames {
+                    Some(f.len())
+                } else {
+                    None
+                },
 
-            EventData::PacketLost { .. } |
-            EventData::MarkedForRetransmit { .. } |
-            EventData::FramesProcessed { .. } => true,
+            EventData::PacketLost { frames, .. } |
+            EventData::MarkedForRetransmit { frames } |
+            EventData::FramesProcessed { frames } => Some(frames.len()),
 
-            _ => false,
+            _ => None,
         }
     }
 }
@@ -2542,17 +2534,26 @@ mod tests {
         let buff = std::io::Cursor::new(v);
         let writer = Box::new(buff);
 
-        let mut s = QlogStreamer::new(
-            "version".to_string(),
-            Some("title".to_string()),
-            Some("description".to_string()),
+        let mut trace = make_trace();
+        let pkt_hdr = make_pkt_hdr();
+
+        let frame1 = QuicFrame::stream(
+            "40".to_string(),
+            "40".to_string(),
+            "400".to_string(),
+            true,
             None,
-            std::time::Instant::now(),
-            make_trace(),
-            writer,
         );
 
-        let frame = QuicFrame::stream(
+        let event1 = event::Event::packet_sent_min(
+            PacketType::Handshake,
+            pkt_hdr.clone(),
+            Some(vec![frame1]),
+        );
+
+        trace.push_event(std::time::Duration::new(0, 0), event1);
+
+        let frame2 = QuicFrame::stream(
             "0".to_string(),
             "0".to_string(),
             "100".to_string(),
@@ -2560,20 +2561,28 @@ mod tests {
             None,
         );
 
-        let pkt_hdr = make_pkt_hdr();
-
-        let event = event::Event::packet_sent_min(
+        let event2 = event::Event::packet_sent_min(
             PacketType::Initial,
             pkt_hdr,
             Some(Vec::new()),
         );
 
+        let mut s = QlogStreamer::new(
+            "version".to_string(),
+            Some("title".to_string()),
+            Some("description".to_string()),
+            None,
+            std::time::Instant::now(),
+            trace,
+            writer,
+        );
+
         // Before the log is started all other operations should fail.
-        assert!(match s.write_event(event.clone()) {
+        assert!(match s.write_event(event2.clone()) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
-        assert!(match s.write_frame(frame.clone(), false) {
+        assert!(match s.write_frame(frame2.clone(), false) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
@@ -2591,7 +2600,7 @@ mod tests {
             Ok(()) => true,
             _ => false,
         });
-        assert!(match s.write_frame(frame.clone(), true) {
+        assert!(match s.write_frame(frame2.clone(), true) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
@@ -2602,21 +2611,21 @@ mod tests {
 
         // Some events hold frames, can't write any more events until frame
         // writing is concluded.
-        assert!(match s.write_event(event.clone()) {
+        assert!(match s.write_event(event2.clone()) {
             Ok(true) => true,
             _ => false,
         });
-        assert!(match s.write_event(event.clone()) {
+        assert!(match s.write_event(event2.clone()) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
 
         // While writing frames, can't write events.
-        assert!(match s.write_frame(frame.clone(), false) {
+        assert!(match s.write_frame(frame2.clone(), false) {
             Ok(()) => true,
             _ => false,
         });
-        assert!(match s.write_event(event.clone()) {
+        assert!(match s.write_event(event2.clone()) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
@@ -2634,7 +2643,7 @@ mod tests {
         let r = s.writer();
         let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(r) };
 
-        let log_string = r#"{"qlog_version":"version","title":"title","description":"description","traces":[{"vantage_point":{"type":"server"},"title":"Quiche qlog trace","description":"Quiche qlog trace description","configuration":{"time_units":"ms","time_offset":"0"},"event_fields":["relative_time","category","event","data"],"events":[["0","transport","packet_sent",{"packet_type":"initial","header":{"packet_number":"0","packet_size":1251,"payload_length":1224,"version":"ff000018","scil":"8","dcil":"8","scid":"7e37e4dcc6682da8","dcid":"36ce104eee50101c"},"frames":[{"frame_type":"stream","stream_id":"0","offset":"0","length":"100","fin":true}]}]]}]}"#;
+        let log_string = r#"{"qlog_version":"version","title":"title","description":"description","traces":[{"vantage_point":{"type":"server"},"title":"Quiche qlog trace","description":"Quiche qlog trace description","configuration":{"time_units":"ms","time_offset":"0"},"event_fields":["relative_time","category","event","data"],"events":[["0","transport","packet_sent",{"packet_type":"handshake","header":{"packet_number":"0","packet_size":1251,"payload_length":1224,"version":"ff000018","scil":"8","dcil":"8","scid":"7e37e4dcc6682da8","dcid":"36ce104eee50101c"},"frames":[{"frame_type":"stream","stream_id":"40","offset":"40","length":"400","fin":true}]}],["0","transport","packet_sent",{"packet_type":"initial","header":{"packet_number":"0","packet_size":1251,"payload_length":1224,"version":"ff000018","scil":"8","dcil":"8","scid":"7e37e4dcc6682da8","dcid":"36ce104eee50101c"},"frames":[{"frame_type":"stream","stream_id":"0","offset":"0","length":"100","fin":true}]}]]}]}"#;
 
         let written_string = std::str::from_utf8(w.as_ref().get_ref()).unwrap();
 

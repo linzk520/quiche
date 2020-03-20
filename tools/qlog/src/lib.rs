@@ -313,10 +313,10 @@ pub enum StreamerState {
 /// `Trace`.
 ///
 /// Serialization is progressively driven by method calls; once log streaming is
-/// started, `event::Events` can be written using `write_event()`. Some events
+/// started, `event::Events` can be written using `add_event()`. Some events
 /// can contain an array of `QuicFrame`s, when writing such an event, the
 /// streamer enters a frame-serialization mode where frames are be progressively
-/// written using `write_frame()`. This mode is concluded using
+/// written using `add_frame()`. This mode is concluded using
 /// `finished_frames()`. While serializing frames, any attempts to log
 /// additional events are ignored.
 ///
@@ -367,7 +367,7 @@ impl QlogStreamer {
     /// This writes out the JSON-serialized form of all information up to qlog
     /// `Trace`'s array of `EventField`s. EventFields are separately appended
     /// using functions that accept and `event::Event`.
-    pub fn write_start(&mut self) -> Result<()> {
+    pub fn start_log(&mut self) -> Result<()> {
         if self.state != StreamerState::Initial {
             return Err(Error::Done);
         }
@@ -397,7 +397,7 @@ impl QlogStreamer {
     ///
     /// The JSON-serialized output has remaining close delimiters added.
     /// After this is called, no more serialization will occur.
-    pub fn log_finish(&mut self) -> Result<()> {
+    pub fn finish_log(&mut self) -> Result<()> {
         if self.state == StreamerState::Initial ||
             self.state == StreamerState::Finished
         {
@@ -421,7 +421,7 @@ impl QlogStreamer {
     /// events are ignored.
     ///
     /// If the event contains no array of `QuicFrames` return `false`.
-    pub fn write_event(&mut self, event: event::Event) -> Result<bool> {
+    pub fn add_event(&mut self, event: event::Event) -> Result<bool> {
         if self.state != StreamerState::Ready {
             return Err(Error::InvalidState);
         }
@@ -497,7 +497,7 @@ impl QlogStreamer {
     /// Writes a JSON-serialized `QuicFrame`.
     ///
     /// Only valid while in the frame-serialization mode.
-    pub fn write_frame(&mut self, frame: QuicFrame, last: bool) -> Result<()> {
+    pub fn add_frame(&mut self, frame: QuicFrame, last: bool) -> Result<()> {
         if self.state != StreamerState::WritingFrames {
             return Err(Error::InvalidState);
         }
@@ -2579,11 +2579,11 @@ mod tests {
         );
 
         // Before the log is started all other operations should fail.
-        assert!(match s.write_event(event2.clone()) {
+        assert!(match s.add_event(event2.clone()) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
-        assert!(match s.write_frame(frame2.clone(), false) {
+        assert!(match s.add_frame(frame2.clone(), false) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
@@ -2591,17 +2591,17 @@ mod tests {
             Err(Error::InvalidState) => true,
             _ => false,
         });
-        assert!(match s.log_finish() {
+        assert!(match s.finish_log() {
             Err(Error::InvalidState) => true,
             _ => false,
         });
 
         // Once a log is started, can't write frames before an event.
-        assert!(match s.write_start() {
+        assert!(match s.start_log() {
             Ok(()) => true,
             _ => false,
         });
-        assert!(match s.write_frame(frame2.clone(), true) {
+        assert!(match s.add_frame(frame2.clone(), true) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
@@ -2612,21 +2612,21 @@ mod tests {
 
         // Some events hold frames, can't write any more events until frame
         // writing is concluded.
-        assert!(match s.write_event(event2.clone()) {
+        assert!(match s.add_event(event2.clone()) {
             Ok(true) => true,
             _ => false,
         });
-        assert!(match s.write_event(event2.clone()) {
+        assert!(match s.add_event(event2.clone()) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
 
         // While writing frames, can't write events.
-        assert!(match s.write_frame(frame2.clone(), false) {
+        assert!(match s.add_frame(frame2.clone(), false) {
             Ok(()) => true,
             _ => false,
         });
-        assert!(match s.write_event(event2.clone()) {
+        assert!(match s.add_event(event2.clone()) {
             Err(Error::InvalidState) => true,
             _ => false,
         });
@@ -2636,7 +2636,7 @@ mod tests {
             Ok(()) => true,
             _ => false,
         });
-        assert!(match s.log_finish() {
+        assert!(match s.finish_log() {
             Ok(()) => true,
             _ => false,
         });

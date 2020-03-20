@@ -1197,7 +1197,7 @@ impl Connection {
             writer,
         );
 
-        streamer.write_start().ok();
+        streamer.start_log().ok();
 
         let ev = self.peer_transport_params.to_qlog(
             qlog::TransportOwner::Local,
@@ -1206,7 +1206,7 @@ impl Connection {
             self.handshake.cipher(),
         );
 
-        streamer.write_event(ev).ok();
+        streamer.add_event(ev).ok();
 
         self.qlog_streamer = Some(streamer);
     }
@@ -1568,7 +1568,7 @@ impl Connection {
                 Some(&hdr.dcid),
             );
 
-            q.write_event(Event::packet_received(
+            q.add_event(Event::packet_received(
                 hdr.ty.to_qlog(),
                 qlog_pkt_hdr,
                 Some(Vec::new()),
@@ -1599,7 +1599,7 @@ impl Connection {
             let frame = frame::Frame::from_bytes(&mut payload, hdr.ty)?;
 
             qlog_with!(self.qlog_streamer, q, {
-                q.write_frame(frame.to_qlog(), false).ok();
+                q.add_frame(frame.to_qlog(), false).ok();
             });
 
             if frame.ack_eliciting() {
@@ -1631,7 +1631,7 @@ impl Connection {
                     );
 
                     if let Some(qlog_streamer) = self.qlog_streamer.as_mut() {
-                        qlog_streamer.write_event(ev).unwrap();
+                        qlog_streamer.add_event(ev).unwrap();
                     }
 
                     self.qlogged_peer_params = true;
@@ -2244,7 +2244,7 @@ impl Connection {
                 Some(Vec::new()),
             );
 
-            q.write_event(packet_sent_ev).ok();
+            q.add_event(packet_sent_ev).ok();
         });
 
         // Encode frames into the output packet.
@@ -2254,7 +2254,7 @@ impl Connection {
             frame.to_bytes(&mut b)?;
 
             qlog_with!(self.qlog_streamer, q, {
-                q.write_frame(frame.to_qlog(), false).ok();
+                q.add_frame(frame.to_qlog(), false).ok();
             });
         }
 
@@ -2299,7 +2299,7 @@ impl Connection {
 
         qlog_with!(self.qlog_streamer, q, {
             let ev = self.recovery.to_qlog();
-            q.write_event(ev).ok();
+            q.add_event(ev).ok();
         });
 
         self.pkt_num_spaces[epoch].next_pkt_num += 1;
@@ -2714,7 +2714,7 @@ impl Connection {
                 trace!("{} draining timeout expired", self.trace_id);
 
                 qlog_with!(self.qlog_streamer, q, {
-                    q.log_finish().ok();
+                    q.finish_log().ok();
                 });
 
                 self.closed = true;
@@ -2731,7 +2731,7 @@ impl Connection {
                 trace!("{} idle timeout expired", self.trace_id);
 
                 qlog_with!(self.qlog_streamer, q, {
-                    q.log_finish().ok();
+                    q.finish_log().ok();
                 });
 
                 self.closed = true;
@@ -2751,7 +2751,7 @@ impl Connection {
 
                 qlog_with!(self.qlog_streamer, q, {
                     let ev = self.recovery.to_qlog();
-                    q.write_event(ev).ok();
+                    q.add_event(ev).ok();
                 });
 
                 return;
@@ -3014,7 +3014,7 @@ impl Connection {
 
                 qlog_with!(self.qlog_streamer, q, {
                     let ev = self.recovery.to_qlog();
-                    q.write_event(ev).ok();
+                    q.add_event(ev).ok();
                 });
 
                 // When we receive an ACK for a 1-RTT packet after handshake

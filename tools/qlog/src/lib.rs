@@ -298,6 +298,14 @@ impl Default for Qlog {
     }
 }
 
+#[derive(PartialEq)]
+pub enum StreamerState {
+    Initial,
+    Ready,
+    WritingFrames,
+    Finished,
+}
+
 /// A helper object specialized for streaming JSON-serialized qlog to a
 /// [`Write`] trait.
 ///
@@ -317,12 +325,9 @@ pub struct QlogStreamer {
     start_time: std::time::Instant,
     writer: Box<dyn std::io::Write>,
     qlog: Qlog,
-    log_started: bool,
-    log_finished: bool,
+    state: StreamerState,
     first_event: bool,
     first_frame: bool,
-    writing_event: bool,
-    writing_frames: bool,
 }
 
 impl QlogStreamer {
@@ -351,12 +356,9 @@ impl QlogStreamer {
             start_time,
             writer,
             qlog,
+            state: StreamerState::Initial,
             first_event: true,
             first_frame: false,
-            writing_event: false,
-            writing_frames: false,
-            log_started: false,
-            log_finished: false,
         }
     }
 
@@ -366,8 +368,7 @@ impl QlogStreamer {
     /// `Trace`'s array of `EventField`s. EventFields are separately appended
     /// using functions that accept and `event::Event`.
     pub fn write_start(&mut self) -> Result<()> {
-        // We can only start the log once.
-        if self.log_started {
+        if self.state != StreamerState::Initial {
             return Err(Error::Done);
         }
 
@@ -381,7 +382,7 @@ impl QlogStreamer {
 
                 self.writer.as_mut().write_all(out.as_bytes())?;
 
-                self.log_started = true;
+                self.state = StreamerState::Ready;
 
                 self.first_event = self.qlog.traces[0].events.is_empty();
             },
@@ -397,13 +398,15 @@ impl QlogStreamer {
     /// The JSON-serialized output has remaining close delimiters added.
     /// After this is called, no more serialization will occur.
     pub fn log_finish(&mut self) -> Result<()> {
-        if !self.log_started || self.log_finished {
+        if self.state == StreamerState::Initial ||
+            self.state == StreamerState::Finished
+        {
             return Err(Error::InvalidState);
         }
 
         self.writer.as_mut().write_all(b"]}]}")?;
 
-        self.log_finished = true;
+        self.state = StreamerState::Finished;
 
         self.writer.as_mut().flush()?;
 
@@ -419,11 +422,7 @@ impl QlogStreamer {
     ///
     /// If the event contains no array of `QuicFrames` return `false`.
     pub fn write_event(&mut self, event: event::Event) -> Result<bool> {
-        if !self.log_started ||
-            self.log_finished ||
-            self.writing_event ||
-            self.writing_frames
-        {
+        if self.state != StreamerState::Ready {
             return Err(Error::InvalidState);
         }
 
@@ -482,7 +481,12 @@ impl QlogStreamer {
             );
 
             self.writer.as_mut().write_all(out.as_bytes())?;
-            self.writing_event = contains_frames;
+
+            if contains_frames {
+                self.state = StreamerState::WritingFrames
+            } else {
+                self.state = StreamerState::Ready
+            };
 
             return Ok(contains_frames);
         }
@@ -494,7 +498,7 @@ impl QlogStreamer {
     ///
     /// Only valid while in the frame-serialization mode.
     pub fn write_frame(&mut self, frame: QuicFrame, last: bool) -> Result<()> {
-        if !self.writing_event || self.log_finished {
+        if self.state != StreamerState::WritingFrames {
             return Err(Error::InvalidState);
         }
 
@@ -505,8 +509,6 @@ impl QlogStreamer {
                 } else {
                     self.first_frame = false;
                 }
-
-                self.writing_frames = true;
 
                 self.writer.as_mut().write_all(out.as_bytes())?;
 
@@ -525,13 +527,12 @@ impl QlogStreamer {
     ///
     /// Only valid while in the frame-serialization mode.
     pub fn finish_frames(&mut self) -> Result<()> {
-        if !self.writing_frames || self.log_finished {
+        if self.state != StreamerState::WritingFrames {
             return Err(Error::InvalidState);
         }
 
         self.writer.as_mut().write_all(b"]}]")?;
-        self.writing_frames = false;
-        self.writing_event = false;
+        self.state = StreamerState::Ready;
 
         Ok(())
     }
